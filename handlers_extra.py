@@ -74,7 +74,8 @@ async def show_stats(msg: Message):
         return
     stats = await db.get_stats()
     top = await db.get_top_users(1)
-    top_info = f"{top[0]['full_name']} ({top[0]['score']} ball)" if top else "—"
+    vip_badge = "👑 " if (top and top[0]['is_vip']) else ""
+    top_info = f"{vip_badge}{top[0]['full_name']} ({top[0]['score']} ball)" if top else "—"
     text = (
         "📊 <b>Bot statistikasi</b>\n\n"
         f"👥 Jami ishtirokchilar: <b>{stats['total_users']}</b>\n"
@@ -184,7 +185,8 @@ async def periodic_rating_show(cb: CallbackQuery):
     lines = []
     for i, u in enumerate(top):
         medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i+1}."
-        lines.append(f"{medal} {u['full_name']} | ⭐ {round(u['period_score'], 1)} | 📋 {u['mission_count']} ta")
+        vip_badge = "👑 " if u['is_vip'] else ""
+        lines.append(f"{medal} {vip_badge}{u['full_name']} | ⭐ {round(u['period_score'], 1)} | 📋 {u['mission_count']} ta")
     await cb.message.edit_text(f"🏅 {label} reyting (Top 20):\n\n" + "\n".join(lines))
     await cb.answer()
 
@@ -229,9 +231,18 @@ async def comment_save(msg: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     mnum = data["mission_number"]
     uid = msg.from_user.id
+    already_commented = await db.has_user_commented(uid, mnum)
     await db.add_comment(uid, mnum, msg.text)
+    from ecopoint import ECOPOINT_REWARDS
+    reward_text = ""
+    if not already_commented:
+        await db.add_ecopoints(uid, ECOPOINT_REWARDS["comment"], f"Missiya #{mnum} izoh")
+        reward_text = f"\n🌿 +{ECOPOINT_REWARDS['comment']} EcoPoint berildi!"
     await state.clear()
-    await msg.answer("✅ Izohingiz qabul qilindi!", reply_markup=kb.main_menu_user())
+    await msg.answer(
+        f"✅ Izohingiz qabul qilindi!{reward_text}",
+        reply_markup=kb.main_menu_user()
+    )
     user = await db.get_user(uid)
     if user:
         coords = await db.get_group_coordinators(user['group_id'])

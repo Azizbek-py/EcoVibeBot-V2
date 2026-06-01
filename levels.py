@@ -6,8 +6,8 @@ LEVELS = [
     (100,  "Leytenant 🎯"),
     (150,  "Kapitan 🛡"),
     (200,  "Mayor 🔥"),
-    (250,  "Polkovnik 👑"),
-    (300,  "Imperator 🏆"),
+    (250,  "Polkovnik 🎖"),
+    (300,  "Imperator 🤴"),
 ]
 
 

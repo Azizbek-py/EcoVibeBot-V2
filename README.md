@@ -63,7 +63,7 @@ challenge_bot/
 | Coordinators | Tayinlash, o'chirish |
 | Guruhga tayinlash | Coordinatorni guruhga biriktirish |
 | Hammaga habar | Barcha userlarga broadcast |
-| Arxiv Missialar | Baholangan topshiriqlarni ko'rish |
+| Arxiv Missiyalar | Baholangan topshiriqlarni ko'rish |
 
 ### 🤝 Coordinator Panel
 Coordinator bo'lgan telegram ID ga `/start` orqali kirish.
@@ -73,7 +73,7 @@ Coordinator bo'lgan telegram ID ga `/start` orqali kirish.
 | Missialar | O'z guruhidagi topshiriqlarni ko'rish va baholash |
 | Users | O'z guruhidagi userslar, ball boshqarish |
 | Reyting | Top 50 |
-| Arxiv Missialar | Baholangan topshiriqlar |
+| Arxiv Missiyalar | Baholangan topshiriqlar |
 
 ### 🔍 Inspektor Panel
 Inspektor bo'lgan telegram ID ga `/start` orqali kirish.

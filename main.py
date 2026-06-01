@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 from dotenv import load_dotenv
-
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
@@ -14,6 +13,8 @@ import handlers_user as user_h
 import handlers_common as common_h
 import handlers_extra as extra_h
 import handlers_shop as shop_h
+import handlers_ecopoint as eco_h
+import handlers_events as events_h
 
 load_dotenv()
 
@@ -43,13 +44,15 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
-    dp.include_router(shop_h.router)    # Do'kon — birinchi
-    dp.include_router(extra_h.router)   # Statistika, deadline, davriy reyting, izoh
-    dp.include_router(common_h.router)  # Bir xil tugmalar rol bo'yicha
-    dp.include_router(user_h.router)    # /start, ro'yxat, profil
-    dp.include_router(admin_h.router)   # Admin
-    dp.include_router(coord_h.router)   # Coordinator FSM
-    dp.include_router(insp_h.router)    # Inspektor FSM
+    dp.include_router(common_h.router)
+    dp.include_router(events_h.router)
+    dp.include_router(eco_h.router)
+    dp.include_router(shop_h.router)
+    dp.include_router(extra_h.router)
+    dp.include_router(user_h.router)
+    dp.include_router(admin_h.router)
+    dp.include_router(coord_h.router)
+    dp.include_router(insp_h.router)
 
     logger.info("Bot ishga tushmoqda...")
     await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
@@ -57,3 +60,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+
+

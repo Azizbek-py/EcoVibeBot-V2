@@ -2,15 +2,17 @@ import json
 import io
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 
 import database as db
 import keyboards as kb
+from aiogram.utils.keyboard import ReplyKeyboardBuilder as RKB
 from states import (
     AddMissionStates, AddCoordinatorStates, AddInspectorStates,
     AssignGroupStates, BroadcastStates, SearchUserStates,
-    AdjustScoreStates, GroupSearchStates, MissionArchiveStates,
+    AdjustScoreStates, AdjustEcopointStates, GroupSearchStates, MissionArchiveStates,
     AdminScoreMissionStates
 )
 
@@ -35,20 +37,24 @@ async def admin_cmd(msg: Message):
         return
     await msg.answer("Admin panelga xush kelibsiz!", reply_markup=kb.main_menu_admin())
 
-@router.message(F.text == "🔙 Orqaga")
-async def back_to_main(msg: Message, state: FSMContext):
+
+# Admin-specific cancel to ensure cancel works inside admin flows and FSM states
+@router.message(F.text == "❌ Bekor qilish")
+async def admin_cancel(msg: Message, state: FSMContext):
+    if not is_admin(msg.from_user.id):
+        return
     await state.clear()
-    uid = msg.from_user.id
-    if is_admin(uid):
-        await msg.answer("Asosiy menyu", reply_markup=kb.main_menu_admin())
-    elif await db.get_coordinator(uid):
-        await msg.answer("Asosiy menyu", reply_markup=kb.main_menu_coordinator())
-    elif await db.get_inspector(uid):
-        await msg.answer("Asosiy menyu", reply_markup=kb.main_menu_inspector())
-    else:
-        user = await db.get_user(uid)
-        if user:
-            await msg.answer("Asosiy menyu", reply_markup=kb.main_menu_user())
+    await msg.answer("Bekor qilindi.", reply_markup=kb.main_menu_admin())
+
+# 🔙 Orqaga — handlers_common.py da
+
+
+# ── Vakolatlar bo'limi ─────────────────────────────────────────
+@router.message(F.text == "🔐 Vakolatlar")
+async def vakolatlar_menu(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+    await msg.answer("Vakolatlar bo'limi:", reply_markup=kb.vakolatlar_menu_admin())
 
 # Missialar — handlers_common.py da
 
@@ -67,10 +73,36 @@ async def add_mission_number(msg: Message, state: FSMContext):
     try:
         num = int(msg.text)
         await state.update_data(number=num)
-        await msg.answer("Missiya sarlavhasini kiriting:")
-        await state.set_state(AddMissionStates.title)
+        # Missiya turi so'rash
+        type_kb = RKB()
+        type_kb.button(text="📌 Asosiy Missiya")
+        type_kb.button(text="⭐ Bonus Missiya")
+        type_kb.adjust(2)
+        await msg.answer(
+            "Missiya turini tanlang:\n\n"
+            "📌 <b>Asosiy</b> — barcha userlar uchun ko'rinadi\n"
+            "⭐ <b>Bonus</b> — qo'shimcha topshiriq, ixtiyoriy",
+            parse_mode="HTML",
+            reply_markup=type_kb.as_markup(resize_keyboard=True)
+        )
+        await state.set_state(AddMissionStates.mission_type)
     except ValueError:
         await msg.answer("Iltimos, son kiriting!")
+
+
+@router.message(AddMissionStates.mission_type)
+async def add_mission_type(msg: Message, state: FSMContext):
+    if msg.text == "📌 Asosiy Missiya":
+        mission_type = "main"
+        type_label = "📌 Asosiy"
+    elif msg.text == "⭐ Bonus Missiya":
+        mission_type = "bonus"
+        type_label = "⭐ Bonus"
+    else:
+        return await msg.answer("Tugmalardan birini tanlang!")
+    await state.update_data(mission_type=mission_type)
+    await msg.answer(f"✅ Tur: {type_label}\n\nMissiya sarlavhasini kiriting:", reply_markup=kb.cancel_kb())
+    await state.set_state(AddMissionStates.title)
 
 @router.message(AddMissionStates.title)
 async def add_mission_title(msg: Message, state: FSMContext):
@@ -81,6 +113,25 @@ async def add_mission_title(msg: Message, state: FSMContext):
 @router.message(AddMissionStates.description)
 async def add_mission_desc(msg: Message, state: FSMContext):
     await state.update_data(description=msg.text)
+    await msg.answer(
+        "🌿 Bu missiya uchun necha <b>EcoPoint</b> berisin?\n"
+        "(0 kiritsangiz EcoPoint berilmaydi)",
+        parse_mode="HTML",
+        reply_markup=kb.cancel_kb()
+    )
+    await state.set_state(AddMissionStates.ecopoint)
+
+
+@router.message(AddMissionStates.ecopoint)
+async def add_mission_ecopoint(msg: Message, state: FSMContext):
+    if msg.text == "❌ Bekor qilish":
+        await state.clear()
+        return await msg.answer("Bekor qilindi.", reply_markup=kb.missions_menu_admin())
+    try:
+        eco = float(msg.text)
+    except ValueError:
+        return await msg.answer("Son kiriting! (masalan: 5 yoki 0)")
+    await state.update_data(ecopoint=eco)
     await msg.answer("Media fayl yuboring (foto/video/hujjat) yoki /skip yozing:")
     await state.set_state(AddMissionStates.media)
 
@@ -100,9 +151,20 @@ async def add_mission_media(msg: Message, state: FSMContext):
     elif msg.document:
         file_id = msg.document.file_id
         file_type = "document"
-    await db.add_mission(data["number"], data["title"], data["description"], file_id, file_type)
+    mission_type = data.get("mission_type", "main")
+    ecopoint = data.get("ecopoint", 0)
+    type_label = "📌 Asosiy" if mission_type == "main" else "⭐ Bonus"
+    await db.add_mission(
+        data["number"], data["title"], data["description"],
+        file_id, file_type, ecopoint, mission_type
+    )
     await state.clear()
-    await msg.answer(f"✅ Missiya #{data['number']} qo'shildi!", reply_markup=kb.missions_menu_admin())
+    await msg.answer(
+        f"✅ Missiya #{data['number']} qo'shildi!\n"
+        f"Tur: {type_label}\n"
+        f"🌿 EcoPoint: {ecopoint}",
+        reply_markup=kb.missions_menu_admin()
+    )
 
 # Delete mission
 @router.message(F.text == "🗑 Missiyani o'chirish")
@@ -135,24 +197,146 @@ async def admin_check_start(msg: Message, state: FSMContext):
         return await msg.answer("Tekshirilmagan topshiriqlar yo'q.")
     await state.set_state(AdminScoreMissionStates.select_submission)
     for s in subs:
-        text = (f"👤 {s['full_name']} (Guruh #{s['group_id']})\n"
+        vip_badge = "👑 " if s['is_vip'] else ""
+        text = (f"👤 {vip_badge}{s['full_name']} (Guruh #{s['group_id']})\n"
                 f"📌 Missiya #{s['mission_number']}\n"
                 f"📅 {s['submitted_at']}\n")
         await _send_submission_content(msg, s, text)
 
+@router.message(F.text == "🔁 Qayta yuborish")
+async def admin_resubmit_requests(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+    subs = await db.get_resubmit_submissions()
+    if not subs:
+        return await msg.answer("Qayta yuborish uchun talab qilingan topshiriqlar topilmadi.", reply_markup=kb.missions_menu_admin())
+
+    await msg.answer(f"🔁 {len(subs)} ta topshiriq qayta yuborishga muhtoj:", reply_markup=kb.missions_menu_admin())
+    for s in subs:
+        vip_badge = "👑 " if s['is_vip'] else ""
+        content = s['content'] or "(kontent yo'q)"
+        text = (
+            f"🆔 ID: {s['id']}\n"
+            f"👤 {vip_badge}{s['full_name']} (Guruh #{s['group_id']})\n"
+            f"📌 Missiya #{s['mission_number']}\n"
+            f"📅 {s['submitted_at']}\n"
+            f"📌 Media turi: {s['file_type'] or 'yo‘q'}\n"
+            f"💬 {content}"
+        )
+        await msg.answer(text)
+
 async def _send_submission_content(msg: Message, s, text: str):
     ikb = kb.inline_quality_score(s['id'])
     if s['file_id']:
-        if s['file_type'] == 'photo':
-            await msg.answer_photo(s['file_id'], caption=text, reply_markup=ikb)
-        elif s['file_type'] == 'video':
-            await msg.answer_video(s['file_id'], caption=text, reply_markup=ikb)
-        elif s['file_type'] == 'document':
-            await msg.answer_document(s['file_id'], caption=text, reply_markup=ikb)
+        try:
+            if s['file_type'] == 'photo':
+                await msg.answer_photo(s['file_id'], caption=text, reply_markup=ikb)
+            elif s['file_type'] == 'video':
+                await msg.answer_video(s['file_id'], caption=text, reply_markup=ikb)
+            elif s['file_type'] == 'document':
+                await msg.answer_document(s['file_id'], caption=text, reply_markup=ikb)
+            else:
+                raise ValueError("Noma'lum fayl turi")
+        except TelegramBadRequest as exc:
+            note = "\n[Media eskirgan va file_id olib tashlandi. Iltimos, missiyani qayta yuboring.]"
+            await db.clear_submission_file(s['id'], note)
+            try:
+                await msg.bot.send_message(
+                    s['user_telegram_id'],
+                    f"Salom! Missiya #{s['mission_number']} uchun yuborilgan media eskirgan. Iltimos, missiyani qayta yuboring."
+                )
+            except Exception:
+                pass
+            fallback_text = (
+                text + f"\n\n⚠️ Media jo'natishda xato: {str(exc)}\n"
+                f"File ID DBdan olib tashlandi va foydalanuvchiga qayta yuborish so'raldi.\n"
+            )
+            if s['content']:
+                fallback_text += f"\n💬 {s['content']}"
+            await msg.answer(fallback_text, reply_markup=ikb)
+        except Exception as exc:
+            fallback_text = (
+                text + f"\n\n⚠️ Media jo'natishda kutilmagan xato: {type(exc).__name__}: {exc}\n"
+            )
+            if s['content']:
+                fallback_text += f"\n💬 {s['content']}"
+            await msg.answer(fallback_text, reply_markup=ikb)
     else:
         if s['content']:
             text += f"\n💬 {s['content']}"
         await msg.answer(text, reply_markup=ikb)
+
+@router.message(StateFilter(AddMissionStates), F.text == "🔁 Qayta yuborish")
+async def admin_resubmit_during_add_mission(msg: Message, state: FSMContext):
+    if not is_admin(msg.from_user.id):
+        return
+    await state.clear()
+    return await admin_resubmit_requests(msg)
+
+@router.message(StateFilter(AdminScoreMissionStates), F.text == "🔁 Qayta yuborish")
+async def admin_resubmit_during_scoring(msg: Message, state: FSMContext):
+    if not is_admin(msg.from_user.id):
+        return
+    await state.clear()
+    return await admin_resubmit_requests(msg)
+
+@router.message(Command("testfile"))
+async def admin_testfile(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+
+    parts = (msg.text or "").split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        return await msg.answer("Iltimos: /testfile <submission_id> shaklida yozing.")
+
+    submission_id = int(parts[1])
+    submission = await db.get_submission_by_id(submission_id)
+    if not submission:
+        return await msg.answer(f"Topshiriq topilmadi: {submission_id}")
+
+    if not submission['file_id']:
+        return await msg.answer(
+            f"Topshiriq #{submission_id} media fayliga ega emas."
+            f"\nKontent: {submission['content'] or '—'}"
+        )
+
+    file_id = submission['file_id']
+    file_type = submission['file_type']
+    text = (
+        f"✅ Topshiriq #{submission_id} sinovdan o'tkazilmoqda.\n"
+        f"Foydalanuvchi: {submission['full_name'] or submission['user_telegram_id']}\n"
+        f"Missiya: #{submission['mission_number']}\n"
+        f"Media turi: {file_type or 'noma' }\n"
+        f"File ID: {file_id}\n"
+    )
+
+    try:
+        info = await msg.bot.get_file(file_id)
+    except TelegramBadRequest as exc:
+        note = "\n[Media eskirgan va file_id olib tashlandi. Iltimos, missiyani qayta yuboring.]"
+        await db.clear_submission_file(submission_id, note)
+        try:
+            await msg.bot.send_message(
+                submission['user_telegram_id'],
+                f"Salom! Missiya #{submission['mission_number']} uchun yuborilgan media eskirgan. Iltimos, missiyani qayta yuboring."
+            )
+        except Exception:
+            pass
+        return await msg.answer(
+            text + f"\n\n❌ File ID noto'g'ri yoki eskirgan: {exc.message}"
+            "\n\nFile ID DBdan o'chirildi va foydalanuvchiga qayta yuborish so'raldi."
+        )
+    except Exception as exc:
+        return await msg.answer(
+            text + f"\n\n❌ Kutilmagan xato: {type(exc).__name__}: {exc}"
+        )
+
+    info_text = (
+        text +
+        f"\n\n✅ File ID o'qildi.\nFile path: {info.file_path or 'noma' }\n"
+        f"File size: {getattr(info, 'file_size', 'noma')}"
+    )
+    return await msg.answer(info_text)
 
 @router.callback_query(F.data.startswith("quality:"))
 async def quality_score_cb(cb: CallbackQuery):
@@ -178,12 +362,18 @@ async def time_score_cb(cb: CallbackQuery, bot: Bot):
             sub = await cur.fetchone()
     if sub:
         user = await db.get_user(sub['user_telegram_id'])
+        # EcoPoint berish
+        eco_reward = await db.get_mission_ecopoint(sub['mission_number'])
+        if eco_reward > 0:
+            await db.add_ecopoints(sub['user_telegram_id'], eco_reward, f"Missiya #{sub['mission_number']} bajarildi")
         # Foydalanuvchiga xabar
         try:
             score_msg = (
                 f"✅ Missiya #{sub['mission_number']} baholandi!\n"
                 f"⭐ Sifat: {quality}/10\n⏱ Vaqt: {time_sc}/10\n📊 Jami: {final}/10"
             )
+            if eco_reward > 0:
+                score_msg += f"\n🌿 EcoPoint: +{eco_reward}"
             if old_level and new_level:
                 score_msg += f"\n\n🎉 Tabriklaymiz! Darajangiz ko'tarildi:\n{old_level} ➜ {new_level}"
             await bot.send_message(sub['user_telegram_id'], score_msg)
@@ -212,32 +402,118 @@ async def time_score_cb(cb: CallbackQuery, bot: Bot):
 
 @router.message(F.text == "📋 Ro'yxat")
 async def users_list(msg: Message):
+    uid = msg.from_user.id
+    if is_admin(uid):
+        users = await db.get_all_users()
+        if not users:
+            return await msg.answer("Ro'yxatdan o'tgan foydalanuvchi yo'q.")
+        data = [dict(u) for u in users]
+        json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        file = BufferedInputFile(json_bytes, filename="users.json")
+        return await msg.answer_document(file, caption=f"👥 Jami: {len(data)} ta foydalanuvchi")
+    if await db.get_coordinator(uid):
+        groups = await db.get_coordinator_groups(uid)
+        if not groups:
+            return await msg.answer("Sizga guruh tayinlanmagan.", reply_markup=kb.main_menu_coordinator())
+        for gnum in groups:
+            users = await db.get_users_by_group(gnum)
+            await msg.answer(f"👥 Guruh #{gnum} a'zolari:")
+            if not users:
+                await msg.answer("Bu guruhda foydalanuvchi yo'q.")
+                continue
+            for u in users:
+                vip_badge = "👑 " if u['is_vip'] else ""
+                text = f"👤 {vip_badge}{u['full_name']} | 🆔 {u['telegram_id']} | ⭐ {u['score']}"
+                await msg.answer(text, reply_markup=kb.inline_user_score_buttons(u['telegram_id'], "coord"))
+        return await msg.answer("Menyu", reply_markup=kb.coord_users_menu())
+
+
+@router.message(F.text == "👥 Guruhlar")
+async def admin_groups_overview(msg: Message):
     if not is_admin(msg.from_user.id):
         return
-    users = await db.get_all_users()
-    if not users:
-        return await msg.answer("Ro'yxatdan o'tgan foydalanuvchi yo'q.")
-    data = [dict(u) for u in users]
+    stats = await db.get_stats()
+    total_users = stats.get("total_users", 0)
+    groups = await db.get_all_groups()
+    if not groups:
+        return await msg.answer("Guruhlar topilmadi.", reply_markup=kb.users_menu_admin())
+    header = (
+        f"👥 Jami foydalanuvchilar: {total_users}\n"
+        f"📚 Guruhlar soni: {len(groups)}\n\n"
+    )
+    await msg.answer(header)
+    for g in groups:
+        gnum = g["group_number"] if isinstance(g, dict) or hasattr(g, 'keys') else g[1]
+        users = await db.get_users_by_group(gnum)
+        count = len(users) if users else 0
+        coords = await db.get_group_coordinators(gnum)
+        if coords:
+            coord_info = []
+            for c in coords:
+                uname = c["username"] or "-"
+                coord_info.append(f"{c['full_name']} (ID: {c['telegram_id']}, @{uname})")
+            coord_text = "; ".join(coord_info)
+        else:
+            coord_text = "Tayinlanmagan"
+        text = f"👥 Guruh #{gnum}: {count} a'zo\n🤝 Coordinator: {coord_text}"
+        await msg.answer(text, reply_markup=kb.inline_export_group_button(gnum))
+
+
+@router.callback_query(F.data.startswith("export_group:"))
+async def export_group_cb(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        return await cb.answer("Ruxsat yo'q!")
+    try:
+        gnum = int(cb.data.split(":")[1])
+    except Exception:
+        return await cb.answer("Noto'g'ri guruh!")
+    users = await db.get_users_by_group(gnum)
+    data = []
+    for u in users:
+        data.append({
+            "full_name": u["full_name"],
+            "telegram_id": u["telegram_id"],
+            "address": u["address"],
+            "phone": u["phone"]
+        })
     json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-    file = BufferedInputFile(json_bytes, filename="users.json")
-    await msg.answer_document(file, caption=f"👥 Jami: {len(data)} ta foydalanuvchi")
+    file = BufferedInputFile(json_bytes, filename=f"group_{gnum}_users.json")
+    try:
+        await cb.message.answer_document(file, caption=f"Guruh #{gnum} foydalanuvchilari ({len(data)} ta)")
+    except Exception:
+        try:
+            await cb.message.answer("Fayl yuborishda xatolik yuz berdi.")
+        except Exception:
+            pass
+    await cb.answer("Yuklandi")
 
 @router.message(F.text == "🔍 Qidirish")
 async def search_user_start(msg: Message, state: FSMContext):
-    if not is_admin(msg.from_user.id):
+    uid = msg.from_user.id
+    if not is_admin(uid) and not await db.get_coordinator(uid):
         return
-    await msg.answer("Foydalanuvchi ismi yoki ID raqamini kiriting:", reply_markup=kb.cancel_kb())
+    await msg.answer("User ID yoki ismni kiriting:", reply_markup=kb.cancel_kb())
     await state.set_state(SearchUserStates.query)
 
 @router.message(SearchUserStates.query)
 async def search_user(msg: Message, state: FSMContext):
-    if msg.text == "❌ Bekor qilish":
+    if msg.text in ("❌ Bekor qilish", "🔙 Orqaga"):
         await state.clear()
-        return await msg.answer("Bekor qilindi.", reply_markup=kb.users_menu_admin())
+        uid = msg.from_user.id
+        if is_admin(uid):
+            return await msg.answer("Bekor qilindi.", reply_markup=kb.users_menu_admin())
+        if await db.get_coordinator(uid):
+            return await msg.answer("Bekor qilindi.", reply_markup=kb.coord_users_menu())
+        return await msg.answer("Bekor qilindi.")
     user = await db.find_user(msg.text)
     await state.clear()
+    uid = msg.from_user.id
     if not user:
-        return await msg.answer("Foydalanuvchi topilmadi.", reply_markup=kb.users_menu_admin())
+        if is_admin(uid):
+            return await msg.answer("Foydalanuvchi topilmadi.", reply_markup=kb.users_menu_admin())
+        if await db.get_coordinator(uid):
+            return await msg.answer("Foydalanuvchi topilmadi.", reply_markup=kb.coord_users_menu())
+        return await msg.answer("Foydalanuvchi topilmadi.")
     coords = await db.get_group_coordinators(user['group_id'] or 0)
     coord_info = ", ".join([f"@{c['username'] or c['telegram_id']}" for c in coords]) or "Tayinlanmagan"
     text = (f"👤 {user['full_name']}\n"
@@ -247,8 +523,12 @@ async def search_user(msg: Message, state: FSMContext):
             f"👥 Guruh #{user['group_id']}\n"
             f"🤝 Coordinator: {coord_info}\n"
             f"⭐ Ball: {user['score']}")
-    await msg.answer(text, reply_markup=kb.inline_user_score_buttons(user['telegram_id'], "admin"))
-    await msg.answer("Asosiy menyu", reply_markup=kb.users_menu_admin())
+    context = "admin" if is_admin(uid) else "coord"
+    await msg.answer(text, reply_markup=kb.inline_user_score_buttons(user['telegram_id'], context))
+    if is_admin(uid):
+        await msg.answer("Asosiy menyu", reply_markup=kb.users_menu_admin())
+    else:
+        await msg.answer("Menyu", reply_markup=kb.coord_users_menu())
 
 @router.message(F.text == "👥 Guruhdan qidirish")
 async def group_search_start(msg: Message, state: FSMContext):
@@ -259,7 +539,7 @@ async def group_search_start(msg: Message, state: FSMContext):
 
 @router.message(GroupSearchStates.group_number)
 async def group_search(msg: Message, state: FSMContext):
-    if msg.text == "❌ Bekor qilish":
+    if msg.text in ("❌ Bekor qilish", "🔙 Orqaga"):
         await state.clear()
         return await msg.answer("Bekor qilindi.", reply_markup=kb.users_menu_admin())
     try:
@@ -273,7 +553,8 @@ async def group_search(msg: Message, state: FSMContext):
     header = f"👥 Guruh #{gnum}\nCoordinatorlar:\n{coord_info}\n\nA'zolar:"
     await msg.answer(header)
     for u in users:
-        text = f"👤 {u['full_name']} | 🆔 {u['telegram_id']} | ⭐ {u['score']}"
+        vip_badge = "👑 " if u['is_vip'] else ""
+        text = f"👤 {vip_badge}{u['full_name']} | 🆔 {u['telegram_id']} | ⭐ {u['score']}"
         await msg.answer(text, reply_markup=kb.inline_user_score_buttons(u['telegram_id'], "admin"))
     if not users:
         await msg.answer("Bu guruhda foydalanuvchi yo'q.")
@@ -295,6 +576,9 @@ async def score_adjust_cb(cb: CallbackQuery, state: FSMContext):
 
 @router.message(AdjustScoreStates.delta)
 async def score_adjust_value(msg: Message, state: FSMContext, bot: Bot):
+    if msg.text == "🔙 Orqaga":
+        await state.clear()
+        return await msg.answer("Bekor qilindi.", reply_markup=kb.users_menu_admin())
     try:
         delta = float(msg.text)
     except ValueError:
@@ -320,12 +604,67 @@ async def score_adjust_value(msg: Message, state: FSMContext, bot: Bot):
 
 # Reyting — handlers_common.py da
 
+# ── EcoPoint adjust callbacks ──────────────────────────────
+_pending_eco_adjust = {}  # chat_id -> (user_id, action)
+
+@router.callback_query(F.data.startswith("add_eco:") | F.data.startswith("sub_eco:"))
+async def ecopoint_adjust_cb(cb: CallbackQuery, state: FSMContext):
+    parts = cb.data.split(":")
+    action = "add" if parts[0] == "add_eco" else "sub"
+    target_uid = int(parts[1])
+    await state.update_data(eco_target=target_uid, eco_action=action)
+    await state.set_state(AdjustEcopointStates.delta)
+    label = "Qo'shish" if action == "add" else "Ayirish"
+    await cb.message.answer(f"{label} uchun EcoPoint miqdorini kiriting:")
+    await cb.answer()
+
+@router.message(AdjustEcopointStates.delta)
+async def ecopoint_adjust_value(msg: Message, state: FSMContext, bot: Bot):
+    if msg.text == "🔙 Orqaga":
+        await state.clear()
+        return await msg.answer("Bekor qilindi.", reply_markup=kb.users_menu_admin())
+    try:
+        delta = float(msg.text)
+    except ValueError:
+        return await msg.answer("Son kiriting!")
+    data = await state.get_data()
+    target = data.get("eco_target")
+    action = data.get("eco_action")
+    
+    if action == "add":
+        await db.add_ecopoints(target, delta, f"Admin tomonidan {delta} EcoPoint qo'shildi")
+    else:
+        success = await db.spend_ecopoints(target, delta, f"Admin tomonidan {delta} EcoPoint ayirildi")
+        if not success:
+            await state.clear()
+            return await msg.answer("❌ Foydalanuvchida yetarli EcoPoint yo'q!", reply_markup=kb.users_menu_admin())
+    
+    await state.clear()
+    action_word = "qo'shildi" if action == "add" else "ayirildi"
+    await msg.answer(f"✅ EcoPoint {action_word}: {delta}")
+    
+    # Foydalanuvchiga xabar yuborish
+    if target:
+        try:
+            eco_msg = f"🌿 EcoPoint {action_word}: {delta}" if action == "add" else f"🌿 EcoPoint ayirildi: {delta}"
+            await bot.send_message(target, eco_msg)
+        except Exception:
+            pass
+
 # ── Inspectors ─────────────────────────────────────────────────
 @router.message(F.text == "🔍 Inspektorlar")
 async def inspectors_menu(msg: Message):
     if not is_admin(msg.from_user.id):
         return
     await msg.answer("Inspektorlar bo'limi:", reply_markup=kb.inspectors_menu_admin())
+
+
+@router.message(F.text == "🤝 Coordinatorlar")
+async def coordinators_menu_v2(msg: Message):
+    uid = msg.from_user.id
+    if not (is_admin(uid) or await db.get_coordinator(uid)):
+        return
+    await msg.answer("Coordinatorlar bo'limi:", reply_markup=kb.coordinators_menu_admin())
 
 @router.message(F.text == "➕ Inspektor Tayinlash")
 async def add_inspector_start(msg: Message, state: FSMContext):
@@ -375,11 +714,7 @@ async def delete_inspector_cb(cb: CallbackQuery):
     await cb.answer()
 
 # ── Coordinators ───────────────────────────────────────────────
-@router.message(F.text == "🤝 Coordinators")
-async def coordinators_menu(msg: Message):
-    if not is_admin(msg.from_user.id):
-        return
-    await msg.answer("Coordinatorlar bo'limi:", reply_markup=kb.coordinators_menu_admin())
+# Coordinatorlar menyusi — 🤝 Coordinatorlar tugmasi orqali
 
 @router.message(F.text == "➕ Coordinator Tayinlash")
 async def add_coordinator_start(msg: Message, state: FSMContext):
@@ -438,9 +773,27 @@ async def delete_coordinator_cb(cb: CallbackQuery):
 async def assign_group_start(msg: Message, state: FSMContext):
     if not is_admin(msg.from_user.id):
         return
-    await msg.answer("Guruh raqamini kiriting:", reply_markup=kb.cancel_kb())
+    all_groups = await db.get_all_groups()
+    if not all_groups:
+        await msg.answer("Hozircha guruh yo'q.", reply_markup=kb.main_menu_admin())
+        return
+    all_groups = [dict(g) for g in all_groups]
+    overview = f"👥 <b>Jami {len(all_groups)} ta guruh:</b>\n\n"
+    assigned_count = 0
+    unassigned_count = 0
+    for group in all_groups:
+        coords = await db.get_group_coordinators(group["group_number"])
+        if coords:
+            assigned_count += 1
+        else:
+            unassigned_count += 1
+    overview += f"✅ Coordinator tayinlangan: {assigned_count}\n"
+    overview += f"❌ Coordinator tayinlanmagan: {unassigned_count}\n\n"
+    overview += "Guruh raqamini kiriting:"
+    await msg.answer(overview, parse_mode="HTML", reply_markup=kb.cancel_kb())
     await state.set_state(AssignGroupStates.group_number)
 
+@router.message(AssignGroupStates.group_number)
 @router.message(AssignGroupStates.group_number)
 async def assign_group_number(msg: Message, state: FSMContext):
     if msg.text == "❌ Bekor qilish":
@@ -450,13 +803,26 @@ async def assign_group_number(msg: Message, state: FSMContext):
         gnum = int(msg.text)
     except ValueError:
         return await msg.answer("Son kiriting!")
+    
     await state.update_data(group_number=gnum)
     coords = await db.get_group_coordinators(gnum)
+    users = await db.get_users_by_group(gnum)
+    
+    user_count = len(users) if users else 0
+    text = f"👥 <b>Guruh #{gnum}</b>\n\n"
+    text += f"👤 A'zolar: {user_count} ta\n"
+    
     if coords:
-        info = "\n".join([f"  🤝 {c['full_name']} (@{c['username'] or c['telegram_id']})" for c in coords])
-        await msg.answer(f"Guruh #{gnum} coordinatorlari:\n{info}\n\nYangi coordinator ID sini kiriting:")
+        text += "\n🤝 <b>Hozirgi Coordinatorlar:</b>\n"
+        for c in coords:
+            text += f"  • {c['full_name']} (🆔 {c['telegram_id']})\n"
+            text += f"    @{c['username'] or '—'}\n"
     else:
-        await msg.answer(f"Guruh #{gnum} ga coordinator tayinlanmagan.\nCoordinator ID sini kiriting:")
+        text += "\n❌ <b>Coordinator tayinlanmagan</b>\n"
+    
+    text += "\n\nYangi coordinator ID sini kiriting:\n(Mavjud ID ni kiritsangiz, oldingi coordinator o'rniga o'tadi)"
+    
+    await msg.answer(text, parse_mode="HTML", reply_markup=kb.cancel_kb())
     await state.set_state(AssignGroupStates.coordinator_id)
 
 @router.message(AssignGroupStates.coordinator_id)
@@ -471,10 +837,16 @@ async def assign_group_coordinator(msg: Message, state: FSMContext):
     data = await state.get_data()
     gnum = data["group_number"]
     ok, result_msg = await db.assign_coordinator_to_group(gnum, cid)
+    coord_info = ""
+    if ok:
+        coord = await db.get_coordinator(cid)
+        if coord:
+            coord = dict(coord)
+            coord_info = f"\n\n🤝 Coordinator: {coord['full_name']}\n🆔 ID: {cid}\n@{coord['username'] or '—'}"
+    
     await state.clear()
-    await msg.answer(result_msg, reply_markup=kb.main_menu_admin())
+    await msg.answer(result_msg + coord_info, reply_markup=kb.main_menu_admin())
 
-# ── Broadcast ──────────────────────────────────────────────────
 @router.message(F.text == "📢 Hammaga habar")
 async def broadcast_start(msg: Message, state: FSMContext):
     if not is_admin(msg.from_user.id):
@@ -506,7 +878,7 @@ async def broadcast_send(msg: Message, state: FSMContext, bot: Bot):
     await msg.answer(f"✅ {count} ta foydalanuvchiga yuborildi.", reply_markup=kb.main_menu_admin())
 
 # ── Archive missions ───────────────────────────────────────────
-@router.message(F.text == "📁 Arxiv Missialar")
+@router.message(F.text == "📁 Arxiv Missiyalar")
 async def archive_start(msg: Message, state: FSMContext):
     uid = msg.from_user.id
     if not (is_admin(uid) or await db.get_coordinator(uid)):
@@ -547,7 +919,8 @@ async def archive_show(msg: Message, state: FSMContext):
     if not subs:
         return await msg.answer("Bu mezonlarga mos arxiv yo'q.", reply_markup=rm)
     for s in subs:
-        text = (f"👤 {s['full_name']} (Guruh #{s['group_id']})\n"
+        vip_badge = "👑 " if s['is_vip'] else ""
+        text = (f"👤 {vip_badge}{s['full_name']} (Guruh #{s['group_id']})\n"
                 f"📌 Missiya #{s['mission_number']}\n"
                 f"⭐ Sifat: {s['quality_score']} | Vaqt: {s['time_score']} | Jami: {s['final_score']}\n"
                 f"📅 {s['submitted_at']}")
